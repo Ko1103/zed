@@ -1,7 +1,4 @@
-use crate::{
-    db::{ExtensionMetadata, NewExtensionVersion},
-    AppState, Error, Result,
-};
+use crate::{db::NewExtensionVersion, AppState, Error, Result};
 use anyhow::{anyhow, Context as _};
 use aws_sdk_s3::presigning::PresigningConfig;
 use axum::{
@@ -12,7 +9,8 @@ use axum::{
     Extension, Json, Router,
 };
 use collections::HashMap;
-use serde::{Deserialize, Serialize};
+use rpc::{ExtensionApiManifest, GetExtensionsResponse};
+use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 use time::PrimitiveDateTime;
 use util::ResultExt;
@@ -33,6 +31,8 @@ pub fn router() -> Router {
 #[derive(Debug, Deserialize)]
 struct GetExtensionsParams {
     filter: Option<String>,
+    #[serde(default)]
+    max_schema_version: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,25 +46,14 @@ struct DownloadExtensionParams {
     version: String,
 }
 
-#[derive(Debug, Serialize)]
-struct GetExtensionsResponse {
-    pub data: Vec<ExtensionMetadata>,
-}
-
-#[derive(Deserialize)]
-struct ExtensionManifest {
-    name: String,
-    version: String,
-    description: Option<String>,
-    authors: Vec<String>,
-    repository: String,
-}
-
 async fn get_extensions(
     Extension(app): Extension<Arc<AppState>>,
     Query(params): Query<GetExtensionsParams>,
 ) -> Result<Json<GetExtensionsResponse>> {
-    let extensions = app.db.get_extensions(params.filter.as_deref(), 500).await?;
+    let extensions = app
+        .db
+        .get_extensions(params.filter.as_deref(), params.max_schema_version, 500)
+        .await?;
     Ok(Json(GetExtensionsResponse { data: extensions }))
 }
 
@@ -81,7 +70,7 @@ async fn download_latest_extension(
         Extension(app),
         Path(DownloadExtensionParams {
             extension_id: params.extension_id,
-            version: extension.version,
+            version: extension.manifest.version.to_string(),
         }),
     )
     .await
@@ -267,7 +256,7 @@ async fn fetch_extension_manifest(
         })?
         .to_vec();
     let manifest =
-        serde_json::from_slice::<ExtensionManifest>(&manifest_bytes).with_context(|| {
+        serde_json::from_slice::<ExtensionApiManifest>(&manifest_bytes).with_context(|| {
             format!(
                 "invalid manifest for extension {extension_id} version {version}: {}",
                 String::from_utf8_lossy(&manifest_bytes)
@@ -287,6 +276,8 @@ async fn fetch_extension_manifest(
         description: manifest.description.unwrap_or_default(),
         authors: manifest.authors,
         repository: manifest.repository,
+        schema_version: manifest.schema_version.unwrap_or(0),
+        wasm_api_version: manifest.wasm_api_version,
         published_at,
     })
 }
